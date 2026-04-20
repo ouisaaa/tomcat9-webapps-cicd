@@ -1,0 +1,150 @@
+/*
+파이프라인 정보
+- maven: 3.8.6-openjdk-8
+- 외부 라이브러리: commonLib 2.0.9 (해당 라이브러리는 빌드 시 필요한 외부 라이브러리 임으로, 다른 maven 기반 프로젝트를 빌드 시 해당 라이브러리 설정 삭제 후 사용하시길 바랍니다.)
+*/
+
+pipeline {
+    agent any
+    
+    parameters {
+        choice(name: 'CONTAINER_NAME', 
+               choices: ['tomcat-prod', 'tomcat-staging'], 
+               description: '배포할 대상 컨테이너 선택(대상이 없을 경우 문의 바랍니다.)')
+        string(name: 'GIT_REVISION', defaultValue: 'main', description: '배포할 브랜치 또는 커밋 해시')
+        booleanParam(name: 'SKIP_DEPLOY', defaultValue: false, description: '체크 시 배포 단계 생략 (빌드만 수행)')
+        string(name: 'LIB_VERSION', defaultValue: '2.0.9', description: '외부 라이브러리(commonLib) 버전')
+    }
+    
+    environment {
+        // [1] 메인 프로젝트 설정
+        GITHUB_REPO_URL       = 'https://github.com/<your-org>/<your-repo>.git'
+        GITHUB_CREDENTIALS_ID = 'github-credentials'
+        
+        // [2] 외부 라이브러리 파일 위치
+        LOCAL_LIB_PATH = '/build_lib'
+        LIB_FILENAME   = "commonLib-${params.LIB_VERSION}.jar"
+        
+        // [3] 외부 라이브러리 Maven 등록 정보
+        LIB_GROUP_ID    = 'com.example'
+        LIB_ARTIFACT_ID = 'commonLib'
+        LIB_VERSION     = "${params.LIB_VERSION}"
+        
+        // [4] 배포 타겟 설정
+        TARGET_DIR   = '/usr/local/tomcat/webapps'
+        WAR_FILENAME = 'app.war'
+        
+        // [5] 빌드 환경 (Java 8)
+        BUILD_IMAGE = 'maven:3.8.6-openjdk-8'
+
+        // [6] webapps 배포할 war 이름
+        CD_WAR = 'app'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "🚚 소스 코드 가져오기: ${params.GIT_REVISION}"
+                checkout([$class: 'GitSCM', 
+                    branches: [[name: "${params.GIT_REVISION}"]],
+                    userRemoteConfigs: [[url: "${env.GITHUB_REPO_URL}", credentialsId: "${env.GITHUB_CREDENTIALS_ID}"]]
+                ])
+            }
+        }
+        
+        stage('Prepare Libs') {
+            steps {
+                script {
+                    echo "📂 로컬 라이브러리 가져오기 (버전: ${env.LIB_VERSION})..."
+                    sh 'mkdir -p libs'
+                    
+                    sh """
+                        if [ -f "${env.LOCAL_LIB_PATH}/${env.LIB_FILENAME}" ]; then
+                            echo "✅ 파일 확인됨: ${env.LOCAL_LIB_PATH}/${env.LIB_FILENAME}"
+                            cp ${env.LOCAL_LIB_PATH}/${env.LIB_FILENAME} libs/
+                        else
+                            echo "❌ 오류: ${env.LOCAL_LIB_PATH} 경로에 ${env.LIB_FILENAME} 파일이 없습니다!"
+                            exit 1
+                        fi
+                    """
+                    sh "ls -lh libs/${env.LIB_FILENAME}"
+                }
+            }
+        }
+        
+        stage('Build with Maven') {
+            steps {
+                script {
+                    echo "🔨 Maven 빌드 시작 (Java 8)..."
+                    
+                    // Maven 로컬 캐시 공유로 매 빌드마다 의존성 재다운로드 방지
+                    docker.image("${env.BUILD_IMAGE}").inside('-v /var/jenkins_home/.m2:/root/.m2') {
+                        echo "🔧 외부 라이브러리 로컬 Maven 저장소 등록..."
+                        sh """
+                            mvn install:install-file \
+                            -Dfile=libs/${LIB_FILENAME} \
+                            -DgroupId=${LIB_GROUP_ID} \
+                            -DartifactId=${LIB_ARTIFACT_ID} \
+                            -Dversion=${LIB_VERSION} \
+                            -Dpackaging=jar
+                        """
+                        
+                        echo "🏗️ 프로젝트 빌드 중..."
+                        sh 'mvn clean package -DskipTests'
+                    }
+                }
+            }
+        }
+
+        stage('Find WAR') {
+            steps {
+                script {
+                    // findFiles 플러그인 없이 리눅스 명령어로 WAR 탐색
+                    def foundWar = sh(script: 'find target -name "*.war" | head -n 1 | tr -d "\n"', returnStdout: true).trim()
+                    
+                    if (foundWar) {
+                        env.BUILT_WAR_PATH = foundWar
+                        echo "✅ 빌드 성공! 파일 경로: ${env.BUILT_WAR_PATH}"
+                    } else {
+                        error "❌ 빌드 실패: target 폴더에 WAR 파일이 없습니다."
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy WAR') {
+            when {
+                expression { !params.SKIP_DEPLOY }
+            }
+            steps {
+                echo "📤 WAR 파일 배포 (${CD_WAR}.war 로 배포)..."
+                sh """
+                    # 1. 기존 WAR 백업
+                    docker exec ${params.CONTAINER_NAME} mkdir -p ${TARGET_DIR}/backup/${env.JOB_NAME}/${env.BUILD_NUMBER}
+                    docker exec ${params.CONTAINER_NAME} sh -c "mv ${TARGET_DIR}/${CD_WAR}.war ${TARGET_DIR}/backup/${env.JOB_NAME}/${env.BUILD_NUMBER} 2>/dev/null || true"
+                    
+                    # 2. 기존 배포 파일 삭제
+                    docker exec ${params.CONTAINER_NAME} sh -c "rm -rf ${TARGET_DIR}/${CD_WAR}* 2>/dev/null || true"
+
+                    # 3. 새 WAR 파일 임시 경로로 전송
+                    docker exec ${params.CONTAINER_NAME} mkdir -p ${TARGET_DIR}/new/${env.JOB_NAME}/${env.BUILD_NUMBER}
+                    docker cp ${env.BUILT_WAR_PATH} ${params.CONTAINER_NAME}:${TARGET_DIR}/new/${env.JOB_NAME}/${env.BUILD_NUMBER}/${WAR_FILENAME}
+                    
+                    # 4. 최종 위치로 이동
+                    docker exec ${params.CONTAINER_NAME} sh -c "mv ${TARGET_DIR}/new/${env.JOB_NAME}/${env.BUILD_NUMBER}/${WAR_FILENAME} ${TARGET_DIR}/${CD_WAR}.war 2>/dev/null || true"
+
+                    # 5. 배포 결과 확인
+                    echo "✅ 배포 상태 확인:"
+                    docker exec ${params.CONTAINER_NAME} sh -c "ls -l ${TARGET_DIR} | grep ${CD_WAR}"
+                """
+            }
+        }
+    }
+    
+    post {
+        always {
+            archiveArtifacts artifacts: 'target/*.war', allowEmptyArchive: true
+            cleanWs()
+        }
+    }
+}

@@ -1,0 +1,27 @@
+version: '3.8'
+services:
+  jenkins:
+    image: jenkins:lts_minimal_docker
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jenkins
+    group_add:
+      - "<docker-gid>"   # 호스트의 docker 그룹 GID (cat /etc/group | grep docker 로 확인)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # 호스트 Docker 소켓 마운트
+      - /cicd/data:/var/jenkins_home                # Jenkins 데이터 영속화
+      - /cicd/build_lib:/build_lib                  # 빌드 공유 라이브러리 (선택)
+    ports:
+      - "9001:8080"
+      # - "50000:50000"  # Agent 사용 시 활성화
+    restart: unless-stopped
+    environment:
+      - JAVA_OPTS=-Xms512m -Xmx768m -Duser.language=ko -Duser.country=KR
+    deploy:
+      resources:
+        limits:
+          memory: 1g   # 리소스 제한 환경에 맞게 조정
+
+volumes:
+  jenkins_home:
