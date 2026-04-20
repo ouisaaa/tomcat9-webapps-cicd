@@ -49,11 +49,10 @@ pipeline {
                     echo "🐘 Gradle 컨테이너(${env.BUILD_IMAGE}) 실행 및 빌드 시작..."
                     
                     // -v 옵션(캐시 공유) 제거 — 권한 이슈 방지
-                    // 필요 시 캐시 볼륨 마운트 옵션 추가 가능
-                    docker.image("${env.BUILD_IMAGE}").inside('') {
+                    docker.image("${env.BUILD_IMAGE}").inside('-v /cicd/cache/gradle:/home/gradle/.gradle') {
                         
                         // --no-daemon: Jenkins 환경에서 Gradle 데몬 비활성화 (메모리 누수 방지)
-                        sh 'gradle clean war -x test --no-daemon'
+                        sh 'gradle clean war -x test --no-daemon -Djdk.tls.client.protocols=TLSv1.2 -Dhttps.protocols=TLSv1.2'
                     }
                 }
             }

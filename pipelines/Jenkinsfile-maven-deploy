@@ -78,7 +78,7 @@ pipeline {
                     echo "🔨 Maven 빌드 시작 (Java 8)..."
                     
                     // Maven 로컬 캐시 공유로 매 빌드마다 의존성 재다운로드 방지
-                    docker.image("${env.BUILD_IMAGE}").inside('-v /var/jenkins_home/.m2:/root/.m2') {
+                    docker.image("${env.BUILD_IMAGE}").inside('-v /cicd/cache/maven:/home/maven/.m2') {
                         echo "🔧 외부 라이브러리 로컬 Maven 저장소 등록..."
                         sh """
                             mvn install:install-file \
@@ -86,11 +86,14 @@ pipeline {
                             -DgroupId=${LIB_GROUP_ID} \
                             -DartifactId=${LIB_ARTIFACT_ID} \
                             -Dversion=${LIB_VERSION} \
-                            -Dpackaging=jar
+                            -Dpackaging=jar \
+                            -Dhttps.protocols=TLSv1.2 \
+                            -Djdk.tls.client.protocols=TLSv1.2 \
+                            -Duser.home=/home/maven
                         """
                         
                         echo "🏗️ 프로젝트 빌드 중..."
-                        sh 'mvn clean package -DskipTests'
+                        sh 'mvn clean package -DskipTests -Dhttps.protocols=TLSv1.2 -Djdk.tls.client.protocols=TLSv1.2 -Duser.home=/home/maven'
                     }
                 }
             }
