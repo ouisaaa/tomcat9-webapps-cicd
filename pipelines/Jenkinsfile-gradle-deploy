@@ -7,7 +7,7 @@ pipeline {
     
     parameters {
         choice(name: 'CONTAINER_NAME', 
-               choices: ['tomcat-prod', 'tomcat-staging'], 
+               choices: ['tomcat-test','tomcat9-avod'], 
                description: '배포할 대상 컨테이너 선택(대상이 없을 경우 문의 바랍니다.)')
         string(name: 'GIT_REVISION', defaultValue: 'main', description: '빌드할 브랜치 또는 커밋 해시')
         booleanParam(name: 'SKIP_DEPLOY', defaultValue: false, description: '배포 단계 스킵')
@@ -15,19 +15,18 @@ pipeline {
     
     environment {
         // GitHub Repository Info
-        GITHUB_REPO_URL = 'https://github.com/<your-org>/<your-repo>.git'
-        GITHUB_CREDENTIALS_ID = 'github-credentials'
+        GITHUB_REPO_URL = 'https://github.com/<YOUR_ORG>/<YOUR_REPO>.git'  // 마스킹
+        GITHUB_CREDENTIALS_ID = 'github-credentials'                        // 마스킹
         
         // Target Container Info (배포될 곳)
         TARGET_DIR = '/usr/local/tomcat/webapps'
         
         // Build Container Info (빌드용 일회용 컨테이너)
-        // 공식 Gradle 이미지 (JDK 11 포함 버전)
         BUILD_IMAGE = 'gradle:8.5-jdk11'
         
         // build.gradle에 설정된 파일명
-        WAR_FILENAME = 'app.war'
-
+        WAR_FILENAME = 'App.war'    // 마스킹
+        
         // webapps 배포할 war 이름
         CD_WAR = 'ROOT'
     }
@@ -48,11 +47,12 @@ pipeline {
                 script {
                     echo "🐘 Gradle 컨테이너(${env.BUILD_IMAGE}) 실행 및 빌드 시작..."
                     
-                    // -v 옵션(캐시 공유) 제거 — 권한 이슈 방지
                     docker.image("${env.BUILD_IMAGE}").inside('-v /cicd/cache/gradle:/home/gradle/.gradle') {
-                        
-                        // --no-daemon: Jenkins 환경에서 Gradle 데몬 비활성화 (메모리 누수 방지)
-                        sh 'gradle clean war -x test --no-daemon -Djdk.tls.client.protocols=TLSv1.2 -Dhttps.protocols=TLSv1.2'
+                        try {
+                            sh 'gradle clean war -x test --no-daemon --offline'
+                        } catch (e) {
+                            sh 'gradle clean war -x test --no-daemon -Djdk.tls.client.protocols=TLSv1.2 -Dhttps.protocols=TLSv1.2'
+                        }
                     }
                 }
             }
@@ -61,7 +61,6 @@ pipeline {
         stage('Find WAR') {
             steps {
                 script {
-                    // Gradle 기본 빌드 경로: build/libs/
                     def warPath = "build/libs/${env.WAR_FILENAME}"
                     
                     if (fileExists(warPath)) {
@@ -81,23 +80,21 @@ pipeline {
             steps {
                 echo "📤 WAR 파일 배포 진행..."
                 sh """
-                    # 1. 기존 WAR 백업
+                    # 1. 백업
                     docker exec ${params.CONTAINER_NAME} mkdir -p ${TARGET_DIR}/backup/${env.JOB_NAME}/${env.BUILD_NUMBER}
                     docker exec ${params.CONTAINER_NAME} sh -c "mv ${TARGET_DIR}/${CD_WAR}.war ${TARGET_DIR}/backup/${env.JOB_NAME}/${env.BUILD_NUMBER}/ 2>/dev/null || true"
                     
-                    # 2. 기존 배포 파일 삭제
+                    # 2. 기존 파일 삭제 
                     docker exec ${params.CONTAINER_NAME} rm -rf ${TARGET_DIR}/${CD_WAR}*
 
-                    # 3. 새 WAR 파일 임시 경로로 전송 후 배포
+                    # 3. 새로 빌드한 WAR 파일 전송
                     docker exec ${params.CONTAINER_NAME} mkdir -p ${TARGET_DIR}/new/${env.JOB_NAME}/${env.BUILD_NUMBER}
-
                     docker cp ${env.BUILT_WAR_PATH} ${params.CONTAINER_NAME}:${TARGET_DIR}/new/${env.JOB_NAME}/${env.BUILD_NUMBER}/${WAR_FILENAME}
-                    
                     docker exec ${params.CONTAINER_NAME} sh -c "mv ${TARGET_DIR}/new/${env.JOB_NAME}/${env.BUILD_NUMBER}/${WAR_FILENAME} ${TARGET_DIR}/${CD_WAR}.war 2>/dev/null || true"
-
-                    # 4. 배포 결과 확인
+                    
+                    # 4. 결과 확인
                     echo "✅ 배포 완료 파일 확인:"
-                    docker exec ${params.CONTAINER_NAME} sh -c "ls -lh ${TARGET_DIR} | grep ${CD_WAR}"
+                    docker exec ${params.CONTAINER_NAME} sh -c "ls -lh ${TARGET_DIR} | grep ${CD_WAR}"  
                 """
             }
         }

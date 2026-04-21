@@ -9,36 +9,36 @@ pipeline {
     
     parameters {
         choice(name: 'CONTAINER_NAME', 
-               choices: ['tomcat-prod', 'tomcat-staging'], 
+               choices: ['tomcat-test','tomcat9-app'], 
                description: '배포할 대상 컨테이너 선택(대상이 없을 경우 문의 바랍니다.)')
         string(name: 'GIT_REVISION', defaultValue: 'main', description: '배포할 브랜치 또는 커밋 해시')
         booleanParam(name: 'SKIP_DEPLOY', defaultValue: false, description: '체크 시 배포 단계 생략 (빌드만 수행)')
-        string(name: 'LIB_VERSION', defaultValue: '2.0.9', description: '외부 라이브러리(commonLib) 버전')
+        string(name: 'LIB_VERSION', defaultValue: '2.0.9', description: '외부 라이브러리 버전')  // 마스킹
     }
     
     environment {
         // [1] 메인 프로젝트 설정
-        GITHUB_REPO_URL       = 'https://github.com/<your-org>/<your-repo>.git'
-        GITHUB_CREDENTIALS_ID = 'github-credentials'
+        GITHUB_REPO_URL = 'https://github.com/<YOUR_ORG>/<YOUR_REPO>.git'  // 마스킹
+        GITHUB_CREDENTIALS_ID = 'github-credentials'                        // 마스킹
         
         // [2] 외부 라이브러리 파일 위치
         LOCAL_LIB_PATH = '/build_lib'
-        LIB_FILENAME   = "commonLib-${params.LIB_VERSION}.jar"
+        LIB_FILENAME   = "commonLib-${params.LIB_VERSION}.jar"              // 마스킹
         
         // [3] 외부 라이브러리 Maven 등록 정보
-        LIB_GROUP_ID    = 'com.example'
-        LIB_ARTIFACT_ID = 'commonLib'
+        LIB_GROUP_ID    = 'com.example'                                     // 마스킹
+        LIB_ARTIFACT_ID = 'commonLib'                                       // 마스킹
         LIB_VERSION     = "${params.LIB_VERSION}"
         
         // [4] 배포 타겟 설정
         TARGET_DIR   = '/usr/local/tomcat/webapps'
-        WAR_FILENAME = 'app.war'
+        WAR_FILENAME = 'App.war'                                            // 마스킹
         
         // [5] 빌드 환경 (Java 8)
         BUILD_IMAGE = 'maven:3.8.6-openjdk-8'
 
         // [6] webapps 배포할 war 이름
-        CD_WAR = 'app'
+        CD_WAR = 'app'                                                      // 마스킹
     }
     
     stages {
@@ -77,9 +77,8 @@ pipeline {
                 script {
                     echo "🔨 Maven 빌드 시작 (Java 8)..."
                     
-                    // Maven 로컬 캐시 공유로 매 빌드마다 의존성 재다운로드 방지
                     docker.image("${env.BUILD_IMAGE}").inside('-v /cicd/cache/maven:/home/maven/.m2') {
-                        echo "🔧 외부 라이브러리 로컬 Maven 저장소 등록..."
+                        echo "🔧 외부 라이브러리 등록..."
                         sh """
                             mvn install:install-file \
                             -Dfile=libs/${LIB_FILENAME} \
@@ -93,7 +92,12 @@ pipeline {
                         """
                         
                         echo "🏗️ 프로젝트 빌드 중..."
-                        sh 'mvn clean package -DskipTests -Dhttps.protocols=TLSv1.2 -Djdk.tls.client.protocols=TLSv1.2 -Duser.home=/home/maven'
+                        try {
+                            sh 'mvn clean package -DskipTests -Duser.home=/home/maven -gs /home/maven/.m2/settings.xml'
+                        } catch (e) {
+                            echo "⚠️ 캐시 미스 감지, 온라인 모드로 재시도..."
+                            sh 'mvn clean package -DskipTests -Dhttps.protocols=TLSv1.2 -Djdk.tls.client.protocols=TLSv1.2 -Duser.home=/home/maven'
+                        }
                     }
                 }
             }
@@ -102,7 +106,6 @@ pipeline {
         stage('Find WAR') {
             steps {
                 script {
-                    // findFiles 플러그인 없이 리눅스 명령어로 WAR 탐색
                     def foundWar = sh(script: 'find target -name "*.war" | head -n 1 | tr -d "\n"', returnStdout: true).trim()
                     
                     if (foundWar) {
@@ -122,21 +125,21 @@ pipeline {
             steps {
                 echo "📤 WAR 파일 배포 (${CD_WAR}.war 로 배포)..."
                 sh """
-                    # 1. 기존 WAR 백업
+                    # 1. 백업
                     docker exec ${params.CONTAINER_NAME} mkdir -p ${TARGET_DIR}/backup/${env.JOB_NAME}/${env.BUILD_NUMBER}
                     docker exec ${params.CONTAINER_NAME} sh -c "mv ${TARGET_DIR}/${CD_WAR}.war ${TARGET_DIR}/backup/${env.JOB_NAME}/${env.BUILD_NUMBER} 2>/dev/null || true"
                     
-                    # 2. 기존 배포 파일 삭제
+                    # 2. 기존 폴더 삭제
                     docker exec ${params.CONTAINER_NAME} sh -c "rm -rf ${TARGET_DIR}/${CD_WAR}* 2>/dev/null || true"
 
-                    # 3. 새 WAR 파일 임시 경로로 전송
+                    # 3. 새 파일 전송
                     docker exec ${params.CONTAINER_NAME} mkdir -p ${TARGET_DIR}/new/${env.JOB_NAME}/${env.BUILD_NUMBER}
                     docker cp ${env.BUILT_WAR_PATH} ${params.CONTAINER_NAME}:${TARGET_DIR}/new/${env.JOB_NAME}/${env.BUILD_NUMBER}/${WAR_FILENAME}
                     
-                    # 4. 최종 위치로 이동
+                    # 4. 새로운 배포 war 이동
                     docker exec ${params.CONTAINER_NAME} sh -c "mv ${TARGET_DIR}/new/${env.JOB_NAME}/${env.BUILD_NUMBER}/${WAR_FILENAME} ${TARGET_DIR}/${CD_WAR}.war 2>/dev/null || true"
 
-                    # 5. 배포 결과 확인
+                    # 5. 결과 확인
                     echo "✅ 배포 상태 확인:"
                     docker exec ${params.CONTAINER_NAME} sh -c "ls -l ${TARGET_DIR} | grep ${CD_WAR}"
                 """
